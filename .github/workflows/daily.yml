@@ -1,0 +1,47 @@
+name: macro-daily
+
+on:
+  schedule:
+    # 21:30 UTC = 06:30 KST (미국 정규장 마감 이후). 월~금(UTC) → 화~토(KST) 아침.
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 리포트 생성
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}
+        run: python -m ludis.cli --save-panel
+
+      - name: 결과 커밋
+        run: |
+          git config user.name  "ludis-bot"
+          git config user.email "ludis-bot@users.noreply.github.com"
+          git add output
+          git diff --staged --quiet || git commit -m "monitor: $(date -u +%Y-%m-%d)"
+          git push
+
+      - name: 리포트 아티팩트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: macro-daily-${{ github.run_number }}
+          path: output/
+          retention-days: 30
+
+  # Vercel 배포는 output/ 커밋을 감지해 자동 실행되도록 프로젝트 설정에서 연결
