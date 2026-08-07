@@ -1,0 +1,167 @@
+"""데이터 소스 어댑터.
+
+각 fetch_* 함수는 DatetimeIndex(영업일) × 지표 id 컬럼의 DataFrame을 반환한다.
+개별 지표 실패가 전체 파이프라인을 중단시키지 않는다 (경고 후 컬럼 누락).
+"""
+from __future__ import annotations
+
+import io
+import os
+import warnings
+from typing import Iterable
+
+import numpy as np
+import pandas as pd
+import requests
+
+FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+FRED_API = "https://api.stlouisfed.org/fred/series/observations"
+ECOS_API = "https://ecos.bok.or.kr/api/StatisticSearch"
+UA = {"User-Agent": "ludis-macro-monitor/1.0"}
+
+
+def _warn(msg: str) -> None:
+    warnings.warn(msg, RuntimeWarning, stacklevel=2)
+
+
+# ── FRED ────────────────────────────────────────────────────────────
+def fetch_fred(specs: dict[str, str], start: str) -> pd.DataFrame:
+    """specs: {indicator_id: fred_series_code}
+
+    FRED_API_KEY 가 있으면 공식 API, 없으면 키 없이 동작하는 fredgraph.csv 사용.
+    """
+    if not specs:
+        return pd.DataFrame()
+    key = os.environ.get("FRED_API_KEY")
+    out: dict[str, pd.Series] = {}
+    for iid, code in specs.items():
+        try:
+            if key:
+                r = requests.get(
+                    FRED_API,
+                    params={
+                        "series_id": code,
+                        "api_key": key,
+                        "file_type": "json",
+                        "observation_start": start,
+                    },
+                    headers=UA,
+                    timeout=30,
+                )
+                r.raise_for_status()
+                obs = r.json()["observations"]
+                s = pd.Series(
+                    {pd.Timestamp(o["date"]): pd.to_numeric(o["value"], errors="coerce") for o in obs}
+                )
+            else:
+                r = requests.get(
+                    FRED_CSV,
+                    params={"id": code, "cosd": start},
+                    headers=UA,
+                    timeout=30,
+                )
+                r.raise_for_status()
+                df = pd.read_csv(io.StringIO(r.text))
+                df.columns = ["date", "value"]
+                s = pd.Series(
+                    pd.to_numeric(df["value"], errors="coerce").values,
+                    index=pd.to_datetime(df["date"]),
+                )
+            out[iid] = s.dropna()
+        except Exception as exc:  # noqa: BLE001
+            _warn(f"[fred] {iid}({code}) 실패: {exc}")
+    return pd.DataFrame(out).sort_index() if out else pd.DataFrame()
+
+
+# ── Yahoo Finance ───────────────────────────────────────────────────
+def fetch_yahoo(specs: dict[str, str], start: str) -> pd.DataFrame:
+    if not specs:
+        return pd.DataFrame()
+    import yfinance as yf
+
+    tickers = list(dict.fromkeys(specs.values()))
+    try:
+        raw = yf.download(
+            tickers, start=start, auto_adjust=True, progress=False,
+            group_by="column", threads=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _warn(f"[yahoo] 일괄 다운로드 실패: {exc}")
+        return pd.DataFrame()
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        close = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw.xs(
+            "Close", axis=1, level=-1
+        )
+    else:
+        close = raw[["Close"]].rename(columns={"Close": tickers[0]})
+
+    out: dict[str, pd.Series] = {}
+    for iid, tk in specs.items():
+        if tk in close.columns:
+            s = close[tk].dropna()
+            if len(s):
+                out[iid] = s
+            else:
+                _warn(f"[yahoo] {iid}({tk}) 데이터 없음")
+        else:
+            _warn(f"[yahoo] {iid}({tk}) 티커 응답 없음")
+    return pd.DataFrame(out).sort_index() if out else pd.DataFrame()
+
+
+# ── ECOS (한국은행) ─────────────────────────────────────────────────
+def fetch_ecos(specs: dict[str, str], start: str, end: str | None = None) -> pd.DataFrame:
+    """specs: {indicator_id: "STAT_CODE/CYCLE/ITEM1"}  예) "817Y002/D/010200000" """
+    if not specs:
+        return pd.DataFrame()
+    key = os.environ.get("ECOS_API_KEY")
+    if not key:
+        _warn("[ecos] ECOS_API_KEY 미설정 — 한국 금리 지표 생략")
+        return pd.DataFrame()
+    end = end or pd.Timestamp.today().strftime("%Y%m%d")
+    s0 = pd.Timestamp(start).strftime("%Y%m%d")
+    out: dict[str, pd.Series] = {}
+    for iid, spec in specs.items():
+        try:
+            stat, cycle, item = spec.split("/")
+            url = f"{ECOS_API}/{key}/json/kr/1/100000/{stat}/{cycle}/{s0}/{end}/{item}"
+            r = requests.get(url, headers=UA, timeout=30)
+            r.raise_for_status()
+            js = r.json()
+            if "StatisticSearch" not in js:
+                raise ValueError(js.get("RESULT", js))
+            rows = js["StatisticSearch"]["row"]
+            s = pd.Series(
+                {pd.Timestamp(x["TIME"]): pd.to_numeric(x["DATA_VALUE"], errors="coerce") for x in rows}
+            )
+            out[iid] = s.dropna()
+        except Exception as exc:  # noqa: BLE001
+            _warn(f"[ecos] {iid}({spec}) 실패: {exc} — 통계표/항목코드 재확인 필요")
+    return pd.DataFrame(out).sort_index() if out else pd.DataFrame()
+
+
+# ── 오프라인 합성 데이터 (파이프라인 검증·CI 스모크테스트용) ────────
+def fetch_synthetic(ids: Iterable[str], start: str, seed: int = 7) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range(start, pd.Timestamp.today().normalize())
+    anchors = {
+        "UST3M": 3.9, "UST2Y": 3.87, "UST5Y": 4.0, "UST10Y": 4.35, "UST30Y": 4.9,
+        "REAL10Y": 1.95, "BEI10": 2.4, "FWD5Y5Y": 2.4,
+        "HY_OAS": 2.77, "IG_OAS": 0.85, "CCC_OAS": 7.2,
+        "WALCL": 6_400_000, "TGA": 720, "RRP": 15, "RESERVES": 3100,
+        "SOFR": 3.9, "EFFR": 3.88, "NFCI": -0.55,
+        "VIX": 17.83, "VIX3M": 19.15, "MOVE": 70.63, "SKEW": 141,
+        "USDKRW": 1450, "USDCNH": 7.05, "USDJPY": 152, "EURUSD": 1.09,
+        "DXY": 97.845, "BROAD_USD": 121,
+        "WTI": 95.67, "BRENT": 101.83, "NATGAS": 2.715,
+        "GOLD": 4714.89, "SILVER": 78.448, "COPPER": 6.1835,
+        "KTB3Y": 2.6, "KTB10Y": 3.0, "CORP3Y": 3.2, "CD91": 2.7, "BASERATE": 2.5,
+        "CLAIMS": 225000, "CONT_CLAIMS": 1900000,
+    }
+    out = {}
+    for i, iid in enumerate(ids):
+        base = anchors.get(iid, 100.0)
+        vol = 0.008 if base > 10 else 0.02
+        path = base * np.exp(np.cumsum(rng.normal(0, vol, len(idx))) - 0.0)
+        out[iid] = pd.Series(path, index=idx)
+    return pd.DataFrame(out)

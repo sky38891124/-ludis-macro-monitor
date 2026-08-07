@@ -1,0 +1,202 @@
+# Ludis Macro Daily Monitor — 지표 레지스트리
+# unit: pct(%) | bp | idx | usd | ratio | bn(십억달러) | krw
+# risk_dir: up  = 값이 오르면 리스크오프 / down = 값이 내리면 리스크오프 / none = 방향 중립
+# thresholds: 절대 레벨 경보선 (warn / alert)
+meta:
+  start: "2018-01-01"
+  z_window: 252          # z-score 산출 창 (영업일)
+  pct_window: 756        # 백분위 산출 창 (약 3년)
+  lookbacks: [1, 5, 20]  # 변화율 산출 구간
+  sigma_flag: 2.0        # 일간 변동이 20일 표준편차의 N배 이상이면 플래그
+
+groups:
+  - id: curve
+    label: 금리·커브
+    indicators:
+      - {id: UST3M,  label: 미국 3M,        source: fred, code: DGS3MO, unit: pct, risk_dir: none}
+      - {id: UST2Y,  label: 미국 2Y,        source: fred, code: DGS2,   unit: pct, risk_dir: none}
+      - {id: UST5Y,  label: 미국 5Y,        source: fred, code: DGS5,   unit: pct, risk_dir: none}
+      - {id: UST10Y, label: 미국 10Y,       source: fred, code: DGS10,  unit: pct, risk_dir: none}
+      - {id: UST30Y, label: 미국 30Y,       source: fred, code: DGS30,  unit: pct, risk_dir: none}
+      - {id: REAL10Y, label: 미국 10Y 실질금리, source: fred, code: DFII10, unit: pct, risk_dir: up,
+         note: "명목금리 상승의 원인 분해. 실질금리 주도면 밸류에이션 압박, 기대인플레 주도면 금 우호"}
+      - {id: BEI10,  label: 10Y 기대인플레(BEI), source: fred, code: T10YIE, unit: pct, risk_dir: none}
+      - {id: FWD5Y5Y, label: 5y5y 선도 기대인플레, source: fred, code: T5YIFR, unit: pct, risk_dir: none,
+         thresholds: {warn: 2.6, alert: 2.9}}
+    derived:
+      - {id: SPREAD_2S10S, label: 2s10s, expr: "UST10Y - UST2Y", unit: pct, risk_dir: down}
+      - {id: SPREAD_3M10Y, label: 3m10y, expr: "UST10Y - UST3M", unit: pct, risk_dir: down,
+         note: "연준이 실제로 참조하는 역전 지표. 2s10s보다 침체 예측력 우위"}
+      - {id: SPREAD_5S30S, label: 5s30s, expr: "UST30Y - UST5Y", unit: pct, risk_dir: none,
+         note: "장기 스티프닝은 기간프리미엄·재정리스크 신호"}
+
+  - id: credit
+    label: 크레딧
+    indicators:
+      - {id: HY_OAS, label: 미국 HY OAS, source: fred, code: BAMLH0A0HYM2, unit: pct, risk_dir: up,
+         thresholds: {warn: 3.5, alert: 4.5}}
+      - {id: IG_OAS, label: 미국 IG OAS, source: fred, code: BAMLC0A0CM, unit: pct, risk_dir: up,
+         thresholds: {warn: 1.2, alert: 1.6}}
+      - {id: CCC_OAS, label: 미국 CCC OAS, source: fred, code: BAMLH0A3HYC, unit: pct, risk_dir: up,
+         thresholds: {warn: 8.0, alert: 10.0},
+         note: "HY 내 최저등급. 사이클 전환 시 HY 전체보다 2~6주 선행하는 경우가 많음"}
+      - {id: HYG, label: HYG(HY ETF), source: yahoo, code: HYG, unit: usd, risk_dir: down}
+      - {id: LQD, label: LQD(IG ETF), source: yahoo, code: LQD, unit: usd, risk_dir: down}
+    derived:
+      - {id: HY_IG_RATIO, label: HY/IG 배율, expr: "HY_OAS / IG_OAS", unit: ratio, risk_dir: up,
+         note: "레벨이 낮아도 배율이 벌어지면 질적 차별화 시작"}
+
+  - id: liquidity
+    label: 유동성·펀딩
+    indicators:
+      - {id: WALCL, label: 연준 자산, source: fred, code: WALCL, unit: bn, risk_dir: down, freq: weekly}
+      - {id: TGA, label: 재무부 일반계정(TGA), source: fred, code: WTREGEN, unit: bn, risk_dir: up, freq: weekly}
+      - {id: RRP, label: 역레포 잔고, source: fred, code: RRPONTSYD, unit: bn, risk_dir: up}
+      - {id: RESERVES, label: 지급준비금, source: fred, code: WRESBAL, unit: bn, risk_dir: down, freq: weekly,
+         thresholds: {warn: 3000, alert: 2800}}
+      - {id: SOFR, label: SOFR, source: fred, code: SOFR, unit: pct, risk_dir: none}
+      - {id: EFFR, label: EFFR, source: fred, code: EFFR, unit: pct, risk_dir: none}
+      - {id: NFCI, label: 시카고연준 금융환경지수, source: fred, code: NFCI, unit: idx, risk_dir: up, freq: weekly,
+         thresholds: {warn: 0.0, alert: 0.3}}
+    derived:
+      - {id: NET_LIQ, label: 순유동성, expr: "WALCL / 1000 - TGA - RRP", unit: bn, risk_dir: down,
+         note: "위험자산 유동성의 1차 근사. 주간 변화 방향이 레벨보다 중요"}
+      - {id: SOFR_EFFR, label: SOFR-EFFR, expr: "(SOFR - EFFR) * 100", unit: bp, risk_dir: up,
+         thresholds: {warn: 5, alert: 10},
+         note: "레포 시장 타이트니스. 분기말 스파이크는 계절성, 분기중 확대는 진성 신호"}
+
+  - id: vol
+    label: 변동성
+    indicators:
+      - {id: VIX, label: VIX, source: yahoo, code: "^VIX", unit: idx, risk_dir: up,
+         thresholds: {warn: 20, alert: 28}}
+      - {id: VIX3M, label: VIX 3개월, source: yahoo, code: "^VIX3M", unit: idx, risk_dir: up}
+      - {id: MOVE, label: MOVE(채권 변동성), source: yahoo, code: "^MOVE", unit: idx, risk_dir: up,
+         thresholds: {warn: 110, alert: 130},
+         note: "채권 '지수'가 아니라 채권 옵션 내재변동성. 금리 방향이 아닌 금리 불확실성"}
+      - {id: SKEW, label: SKEW, source: yahoo, code: "^SKEW", unit: idx, risk_dir: up,
+         thresholds: {warn: 145, alert: 155}}
+    derived:
+      - {id: VIX_TS, label: VIX 기간구조(3M/1M), expr: "VIX3M / VIX", unit: ratio, risk_dir: down,
+         thresholds: {warn: 1.05, alert: 1.00},
+         note: "1.0 하회 = 백워데이션 = 실질적 스트레스. 스팟 vs 선물 레벨 비교는 신호가 아님"}
+
+  - id: equity
+    label: 주식·시장내부
+    indicators:
+      - {id: SPX, label: S&P500, source: yahoo, code: "^GSPC", unit: idx, risk_dir: down}
+      - {id: NDX, label: 나스닥100, source: yahoo, code: "^NDX", unit: idx, risk_dir: down}
+      - {id: SPY, label: SPY, source: yahoo, code: SPY, unit: usd, risk_dir: down}
+      - {id: RSP, label: RSP(동일가중), source: yahoo, code: RSP, unit: usd, risk_dir: down}
+      - {id: SMH, label: SMH(반도체), source: yahoo, code: SMH, unit: usd, risk_dir: down}
+      - {id: IWM, label: IWM(소형주), source: yahoo, code: IWM, unit: usd, risk_dir: down}
+      - {id: XLK, label: XLK(기술), source: yahoo, code: XLK, unit: usd, risk_dir: down}
+      - {id: XLU, label: XLU(유틸리티), source: yahoo, code: XLU, unit: usd, risk_dir: none}
+      - {id: XLY, label: XLY(경기소비재), source: yahoo, code: XLY, unit: usd, risk_dir: down}
+      - {id: XLP, label: XLP(필수소비재), source: yahoo, code: XLP, unit: usd, risk_dir: none}
+      - {id: XLE, label: XLE(에너지), source: yahoo, code: XLE, unit: usd, risk_dir: none}
+      - {id: TLT, label: TLT(장기국채), source: yahoo, code: TLT, unit: usd, risk_dir: none}
+    derived:
+      - {id: BREADTH, label: 시장폭(RSP/SPY), expr: "RSP / SPY", unit: ratio, risk_dir: down,
+         note: "지수 상승이 폭 축소를 동반하면 상승의 질이 낮음. '지수 상승세' 한 줄로 끝내면 놓치는 층"}
+      - {id: AI_PROXY, label: 반도체 상대강도(SMH/SPY), expr: "SMH / SPY", unit: ratio, risk_dir: down,
+         note: "'AI 머니 복귀' 주장의 유일한 검증 가능 대리변수"}
+      - {id: CYCLICAL, label: 경기민감도(XLY/XLP), expr: "XLY / XLP", unit: ratio, risk_dir: down}
+      - {id: RISK_APPETITE, label: 위험선호(XLK/XLU), expr: "XLK / XLU", unit: ratio, risk_dir: down}
+      - {id: SIZE, label: 소형주 상대강도(IWM/SPY), expr: "IWM / SPY", unit: ratio, risk_dir: down}
+
+  - id: fx
+    label: 외환
+    indicators:
+      - {id: DXY, label: 달러인덱스(DXY), source: yahoo, code: "DX-Y.NYB", unit: idx, risk_dir: up,
+         note: "유로 비중 57.6%. 사실상 EUR 반대매매. 단독 해석 금지"}
+      - {id: BROAD_USD, label: 광의 무역가중 달러, source: fred, code: DTWEXBGS, unit: idx, risk_dir: up}
+      - {id: USDKRW, label: USD/KRW, source: yahoo, code: "KRW=X", unit: krw, risk_dir: up,
+         thresholds: {warn: 1400, alert: 1450}}
+      - {id: USDCNH, label: USD/CNH, source: yahoo, code: "CNH=X", unit: idx, risk_dir: up,
+         note: "원화의 실질 1차 앵커. DXY보다 KRW 설명력 높음"}
+      - {id: USDJPY, label: USD/JPY, source: yahoo, code: "JPY=X", unit: idx, risk_dir: none,
+         note: "급락 시 엔캐리 청산 → 글로벌 디레버리징 경로"}
+      - {id: EURUSD, label: EUR/USD, source: yahoo, code: "EURUSD=X", unit: idx, risk_dir: none}
+
+  - id: commodity
+    label: 원자재
+    indicators:
+      - {id: WTI, label: WTI, source: yahoo, code: "CL=F", unit: usd, risk_dir: none}
+      - {id: BRENT, label: 브렌트, source: yahoo, code: "BZ=F", unit: usd, risk_dir: none}
+      - {id: NATGAS, label: 천연가스, source: yahoo, code: "NG=F", unit: usd, risk_dir: none}
+      - {id: GOLD, label: 금, source: yahoo, code: "GC=F", unit: usd, risk_dir: none}
+      - {id: SILVER, label: 은, source: yahoo, code: "SI=F", unit: usd, risk_dir: none}
+      - {id: COPPER, label: 구리, source: yahoo, code: "HG=F", unit: usd, risk_dir: none}
+    derived:
+      - {id: BRENT_WTI, label: 브렌트-WTI, expr: "BRENT - WTI", unit: usd, risk_dir: none,
+         note: "확대 = 비미국 공급 차질/지정학. 유가 상승의 원인 분해에 필수"}
+      - {id: COPPER_GOLD, label: 구리/금, expr: "COPPER / GOLD * 1000", unit: ratio, risk_dir: down,
+         note: "성장 기대의 대리변수. 10Y 금리와 동행해야 정상, 괴리 시 둘 중 하나가 틀림"}
+      - {id: GOLD_SILVER, label: 금/은 배율, expr: "GOLD / SILVER", unit: ratio, risk_dir: up}
+
+  - id: korea
+    label: 한국
+    indicators:
+      - {id: KOSPI, label: KOSPI, source: yahoo, code: "^KS11", unit: idx, risk_dir: down}
+      - {id: KOSDAQ, label: KOSDAQ, source: yahoo, code: "^KQ11", unit: idx, risk_dir: down}
+      - {id: EWY, label: EWY(한국 ETF, 달러기준), source: yahoo, code: EWY, unit: usd, risk_dir: down,
+         note: "EWY/KOSPI 괴리 = 순수 환율효과. 외국인 시각의 한국 수익률"}
+      # ECOS 항목: 통계표/항목 코드는 ECOS 통계코드 검색에서 반드시 재확인할 것 (verify: true)
+      - {id: KTB3Y, label: 국고채 3년, source: ecos, code: "817Y002/D/010200000", unit: pct, risk_dir: none, verify: true}
+      - {id: KTB10Y, label: 국고채 10년, source: ecos, code: "817Y002/D/010210000", unit: pct, risk_dir: none, verify: true}
+      - {id: CORP3Y, label: 회사채 3년 AA-, source: ecos, code: "817Y002/D/010300000", unit: pct, risk_dir: none, verify: true}
+      - {id: CD91, label: CD 91일, source: ecos, code: "817Y002/D/010502000", unit: pct, risk_dir: none, verify: true}
+      - {id: BASERATE, label: 한국은행 기준금리, source: ecos, code: "722Y001/D/0101000", unit: pct, risk_dir: none, verify: true}
+    derived:
+      - {id: KR_CREDIT, label: 회사채-국고 스프레드, expr: "CORP3Y - KTB3Y", unit: pct, risk_dir: up,
+         note: "한국 CDS보다 국내 신용 사이클에 민감. CDS는 대외 인식, 이건 실제 조달 여건"}
+      - {id: KR_CUT_PRICING, label: 국고3Y-기준금리, expr: "KTB3Y - BASERATE", unit: pct, risk_dir: none,
+         note: "음수 확대 = 인하 기대 선반영. 기대 소멸 시 되돌림 리스크"}
+
+  - id: macro
+    label: 실물·서프라이즈
+    indicators:
+      - {id: CLAIMS, label: 신규 실업수당 청구, source: fred, code: ICSA, unit: idx, risk_dir: up, freq: weekly,
+         thresholds: {warn: 260000, alert: 300000},
+         note: "가장 빠른 고빈도 실물 지표. 4주 이동평균으로 판단"}
+      - {id: CONT_CLAIMS, label: 연속 실업수당 청구, source: fred, code: CCSA, unit: idx, risk_dir: up, freq: weekly}
+
+# ── 지표 간 정합성/괴리 감시 ─────────────────────────────
+# mode: sign(방향 엇갈림) | gap(방향 무관 폭 격차) | same_sign(반대여야 할 둘의 동행)
+# lookback 구간 수익률 기준, 임계 min_gap(%p)
+divergences:
+  - {a: WTI, b: XLE, lookback: 5, min_gap: 4.0, mode: sign,
+     msg: "유가와 에너지주 괴리 — 시장이 유가 상승의 지속성을 부정하거나, 주식이 선행 중"}
+  - {a: SPX, b: BREADTH, lookback: 5, min_gap: 2.0, mode: sign,
+     msg: "지수 상승 vs 시장폭 축소 — 상승의 질 저하, 소수 종목 의존"}
+  - {a: COPPER_GOLD, b: UST10Y, lookback: 20, min_gap: 5.0, mode: sign,
+     msg: "성장 대리변수와 장기금리 괴리 — 금리 상승이 성장이 아닌 공급/재정 요인일 가능성"}
+  - {a: HY_OAS, b: VIX, lookback: 5, min_gap: 8.0, mode: sign,
+     msg: "크레딧과 주식 변동성 괴리 — 통상 크레딧이 옳았던 경우가 많음"}
+  - {a: USDKRW, b: USDCNH, lookback: 5, min_gap: 1.0, mode: gap,
+     msg: "원화가 위안화와 이탈 — 국내 고유 요인(수급/정책/신용) 개입"}
+  # 실질금리 채널이 정상이면 달러와 금은 반대로 움직인다. 동반 상승은 채널 이탈 신호.
+  - {a: DXY, b: GOLD, lookback: 20, min_gap: 3.0, mode: same_sign,
+     msg: "달러-금 동반 상승 — 실질금리 외 요인(중앙은행 매수·지정학) 우세"}
+
+# ── 컴포짓 리스크 스코어 가중치 (z-score 가중합, +면 리스크오프) ──
+composite:
+  weights:
+    HY_OAS: 0.20
+    CCC_OAS: 0.10
+    MOVE: 0.15
+    VIX: 0.10
+    VIX_TS: -0.10
+    NET_LIQ: -0.15
+    BREADTH: -0.10
+    COPPER_GOLD: -0.10
+
+# ── 자동 수집 불가, 수동 입력 항목 (report에 체크리스트로 출력) ──
+manual:
+  - "관세청 수출입 20일 통계 (매월 1·11·21일) — 한국 실물의 최속보"
+  - "외국인 KOSPI/KOSDAQ 일별 순매수 (KRX 정보데이터시스템)"
+  - "DRAM/NAND 현물가 (DRAMeXchange) — 반도체 수출단가 선행"
+  - "주간 IG/HY 발행 규모 및 신규발행 스프레드"
+  - "FOMC/CPI/고용 발표 D-day 및 직전 컨센서스"
+  - "한국 CDS 5년물 (Bloomberg/Refinitiv 등 유료 단말)"
