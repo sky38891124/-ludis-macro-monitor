@@ -60,13 +60,20 @@ def fetch_fred(specs: dict[str, str], start: str) -> pd.DataFrame:
                     headers=UA,
                     timeout=30,
                 )
-                r.raise_for_status()
+                if r.status_code != 200:
+                    raise RuntimeError(
+                        f"HTTP {r.status_code} — 키 없는 CSV 경로가 차단됨. "
+                        f"FRED_API_KEY 등록 권장"
+                    )
                 df = pd.read_csv(io.StringIO(r.text))
-                df.columns = ["date", "value"]
+                if df.shape[1] < 2:
+                    raise ValueError(f"예상 밖 응답 형식: {list(df.columns)}")
+                # 컬럼명은 DATE / observation_date 등으로 바뀌어 왔다. 위치로 잡는다.
                 s = pd.Series(
-                    pd.to_numeric(df["value"], errors="coerce").values,
-                    index=pd.to_datetime(df["date"]),
+                    pd.to_numeric(df.iloc[:, 1], errors="coerce").values,
+                    index=pd.to_datetime(df.iloc[:, 0], errors="coerce"),
                 )
+                s = s[s.index.notna()]
             out[iid] = s.dropna()
         except Exception as exc:  # noqa: BLE001
             _warn(f"[fred] {iid}({code}) 실패: {exc}")
