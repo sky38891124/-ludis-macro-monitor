@@ -75,11 +75,11 @@ groups:
     indicators:
       - {id: VIX, label: VIX, source: yahoo, code: "^VIX", unit: idx, risk_dir: up,
          thresholds: {warn: 20, alert: 28}}
-      - {id: VIX3M, label: VIX 3개월, source: yahoo, code: "^VIX3M", unit: idx, risk_dir: up}
-      - {id: MOVE, label: MOVE(채권 변동성), source: yahoo, code: "^MOVE", unit: idx, risk_dir: up,
+      - {id: VIX3M, label: VIX 3개월, source: yahoo, code: "^VIX3M|VIX3M.INDX|^VXV", unit: idx, risk_dir: up}
+      - {id: MOVE, label: MOVE(채권 변동성), source: yahoo, code: "^MOVE|MOVE.INDX", unit: idx, risk_dir: up,
          thresholds: {warn: 110, alert: 130},
          note: "채권 '지수'가 아니라 채권 옵션 내재변동성. 금리 방향이 아닌 금리 불확실성"}
-      - {id: SKEW, label: SKEW, source: yahoo, code: "^SKEW", unit: idx, risk_dir: up,
+      - {id: SKEW, label: SKEW, source: yahoo, code: "^SKEW|SKEW.INDX", unit: idx, risk_dir: up,
          thresholds: {warn: 145, alert: 155}}
     derived:
       - {id: VIX_TS, label: VIX 기간구조(3M/1M), expr: "VIX3M / VIX", unit: ratio, risk_dir: down,
@@ -113,12 +113,12 @@ groups:
   - id: fx
     label: 외환
     indicators:
-      - {id: DXY, label: 달러인덱스(DXY), source: yahoo, code: "DX-Y.NYB", unit: idx, risk_dir: up,
+      - {id: DXY, label: 달러인덱스(DXY), source: yahoo, code: "DX-Y.NYB|DX=F", unit: idx, risk_dir: up,
          note: "유로 비중 57.6%. 사실상 EUR 반대매매. 단독 해석 금지"}
       - {id: BROAD_USD, label: 광의 무역가중 달러, source: fred, code: DTWEXBGS, unit: idx, risk_dir: up}
       - {id: USDKRW, label: USD/KRW, source: yahoo, code: "KRW=X", unit: krw, risk_dir: up,
          thresholds: {warn: 1400, alert: 1450}}
-      - {id: USDCNH, label: USD/CNH, source: yahoo, code: "CNH=X", unit: idx, risk_dir: up,
+      - {id: USDCNH, label: USD/CNH, source: yahoo, code: "CNH=X|USDCNH=X|CNY=X", unit: idx, risk_dir: up,
          note: "원화의 실질 1차 앵커. DXY보다 KRW 설명력 높음"}
       - {id: USDJPY, label: USD/JPY, source: yahoo, code: "JPY=X", unit: idx, risk_dir: none,
          note: "급락 시 엔캐리 청산 → 글로벌 디레버리징 경로"}
@@ -152,7 +152,8 @@ groups:
       - {id: KTB10Y, label: 국고채 10년, source: ecos, code: "817Y002/D/010210000", unit: pct, risk_dir: none, verify: true}
       - {id: CORP3Y, label: 회사채 3년 AA-, source: ecos, code: "817Y002/D/010300000", unit: pct, risk_dir: none, verify: true}
       - {id: CD91, label: CD 91일, source: ecos, code: "817Y002/D/010502000", unit: pct, risk_dir: none, verify: true}
-      - {id: BASERATE, label: 한국은행 기준금리, source: ecos, code: "722Y001/D/0101000", unit: pct, risk_dir: none, verify: true}
+      - {id: BASERATE, label: 한국은행 기준금리, source: ecos, code: "722Y001/D/0101000",
+         unit: pct, risk_dir: none, freq: monthly, verify: true}
     derived:
       - {id: KR_CREDIT, label: 회사채-국고 스프레드, expr: "CORP3Y - KTB3Y", unit: pct, risk_dir: up,
          note: "한국 CDS보다 국내 신용 사이클에 민감. CDS는 대외 인식, 이건 실제 조달 여건"}
