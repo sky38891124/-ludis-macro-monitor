@@ -56,7 +56,8 @@ groups:
       - {id: TGA, label: 재무부 일반계정(TGA), source: fred, code: WTREGEN, unit: bn, risk_dir: up,
          freq: weekly, scale: 0.001}
       - {id: RRP, label: 역레포 잔고, source: fred, code: RRPONTSYD, unit: bn, risk_dir: up,
-         note: "원단위가 이미 십억달러라 scale 불필요"}
+         chg_mode: diff,
+         note: "원단위가 이미 십억달러라 scale 불필요. 잔고가 0 근처라 % 변화는 무의미해 차분으로 본다"}
       - {id: RESERVES, label: 지급준비금, source: fred, code: WRESBAL, unit: bn, risk_dir: down,
          freq: weekly, scale: 0.001, thresholds: {warn: 3000, alert: 2800}}
       - {id: SOFR, label: SOFR, source: fred, code: SOFR, unit: pct, risk_dir: none}
@@ -65,7 +66,8 @@ groups:
          thresholds: {warn: 0.0, alert: 0.3}}
     derived:
       - {id: NET_LIQ, label: 순유동성, expr: "WALCL - TGA - RRP", unit: bn, risk_dir: down,
-         note: "위험자산 유동성의 1차 근사. 주간 변화 방향이 레벨보다 중요"}
+         freq: weekly,
+         note: "위험자산 유동성의 1차 근사. 구성요소 중 둘이 주간 발표라 실질 주간 지표다"}
       - {id: SOFR_EFFR, label: SOFR-EFFR, expr: "(SOFR - EFFR) * 100", unit: bp, risk_dir: up,
          thresholds: {warn: 5, alert: 10},
          note: "레포 시장 타이트니스. 분기말 스파이크는 계절성, 분기중 확대는 진성 신호"}
@@ -159,9 +161,14 @@ groups:
       - {id: BASERATE, label: 한국은행 기준금리, source: ecos, code: "722Y001/D/0101000",
          unit: pct, risk_dir: none, freq: monthly, verify: true}
     derived:
+      - {id: KR_FX_EFFECT, label: 환율효과(EWY/KOSPI), expr: "EWY / KOSPI * 100000", unit: ratio,
+         risk_dir: none,
+         note: "달러기준 ÷ 원화기준 한국 수익률. 변화분이 곧 순수 환율효과"}
       - {id: KR_CREDIT, label: 회사채-국고 스프레드, expr: "CORP3Y - KTB3Y", unit: pct, risk_dir: up,
          note: "한국 CDS보다 국내 신용 사이클에 민감. CDS는 대외 인식, 이건 실제 조달 여건"}
-      - {id: KR_CUT_PRICING, label: 국고3Y-기준금리, expr: "KTB3Y - BASERATE", unit: pct, risk_dir: none,
+      - {id: KR_CUT_PRICING, label: 국고3Y-기준금리, expr: "KTB3Y - BASERATE", unit: pct,
+         risk_dir: none, stale_budget: 25,
+         note2: "기준금리가 월 단위라 이 지표도 갱신이 드물다",
          note: "음수 확대 = 인하 기대 선반영. 기대 소멸 시 되돌림 리스크"}
 
   - id: macro
@@ -170,29 +177,37 @@ groups:
       - {id: CLAIMS, label: 신규 실업수당 청구, source: fred, code: ICSA, unit: idx, risk_dir: up, freq: weekly,
          thresholds: {warn: 260000, alert: 300000},
          note: "가장 빠른 고빈도 실물 지표. 4주 이동평균으로 판단"}
-      - {id: CONT_CLAIMS, label: 연속 실업수당 청구, source: fred, code: CCSA, unit: idx, risk_dir: up, freq: weekly}
+      - {id: CONT_CLAIMS, label: 연속 실업수당 청구, source: fred, code: CCSA, unit: idx,
+         risk_dir: up, freq: weekly, stale_budget: 16,
+         note: "신규 청구보다 한 주 늦게 발표된다"}
 
 # ── 지표 간 정합성/괴리 감시 ─────────────────────────────
 # mode: sign(방향 엇갈림) | gap(방향 무관 폭 격차) | same_sign(반대여야 할 둘의 동행)
 # lookback 구간 수익률 기준, 임계 min_gap(%p)
 divergences:
   - {a: WTI, b: XLE, lookback: 5, min_gap: 4.0, mode: sign,
-     msg: "유가와 에너지주 괴리 — 시장이 유가 상승의 지속성을 부정하거나, 주식이 선행 중"}
+     msg: "유가는 오르는데 에너지주는 빠짐 — 시장이 유가 상승의 지속성을 부정",
+     msg_rev: "유가는 빠지는데 에너지주는 오름 — 주식이 유가 반등을 선행하거나 마진 개선 기대"}
   - {a: SPX, b: BREADTH, lookback: 5, min_gap: 2.0, mode: sign,
-     msg: "지수 상승 vs 시장폭 축소 — 상승의 질 저하, 소수 종목 의존"}
+     msg: "지수 상승 vs 시장폭 축소 — 상승의 질 저하, 소수 종목 의존",
+     msg_rev: "지수 하락 vs 시장폭 확대 — 대형주 조정 중 순환매, 통상 건강한 신호"}
   - {a: COPPER_GOLD, b: UST10Y, lookback: 20, min_gap: 5.0, mode: sign,
-     msg: "성장 대리변수와 장기금리 괴리 — 금리 상승이 성장이 아닌 공급/재정 요인일 가능성"}
+     msg: "성장 기대는 오르는데 금리는 하락 — 연준 완화 기대 선반영 가능성",
+     msg_rev: "성장 기대는 빠지는데 금리는 상승 — 성장이 아닌 공급/재정 요인일 가능성"}
   - {a: HY_OAS, b: VIX, lookback: 5, min_gap: 8.0, mode: sign,
-     msg: "크레딧과 주식 변동성 괴리 — 통상 크레딧이 옳았던 경우가 많음"}
+     msg: "크레딧은 벌어지는데 주식 변동성은 하락 — 통상 크레딧이 옳았던 경우가 많다",
+     msg_rev: "주식 변동성은 오르는데 크레딧은 안정 — 주식 고유 이슈일 가능성"}
   - {a: USDKRW, b: USDCNH, lookback: 5, min_gap: 1.0, mode: gap,
      msg: "원화가 위안화와 이탈 — 국내 고유 요인(수급/정책/신용) 개입"}
   # 실질금리 채널이 정상이면 달러와 금은 반대로 움직인다. 동반 상승은 채널 이탈 신호.
   - {a: WTI, b: XLE, lookback: 5, min_gap: 5.0, mode: gap,
      msg: "유가와 에너지주 상승폭 격차 — 시장이 유가 상승의 지속성을 할인 중"}
   - {a: MOVE, b: VIX, lookback: 5, min_gap: 8.0, mode: sign,
-     msg: "채권 변동성과 주식 변동성 괴리 — 금리 불확실성이 주식에 아직 전이되지 않음"}
+     msg: "채권 변동성은 오르는데 주식은 잠잠 — 금리 불확실성이 아직 전이되지 않음",
+     msg_rev: "주식 변동성은 오르는데 채권은 잠잠 — 주식 고유 이슈"}
   - {a: REAL10Y, b: BEI10, lookback: 20, min_gap: 8.0, mode: sign,
-     msg: "명목금리 상승의 실질/기대인플레 분해 — 실질 주도면 밸류에이션 압박"}
+     msg: "실질금리 상승 + 기대인플레 하락 — 긴축적. 주식 밸류에이션·금에 압박",
+     msg_rev: "실질금리 하락 + 기대인플레 상승 — 완화적. 금과 실물자산에 우호"}
   - {a: DXY, b: GOLD, lookback: 20, min_gap: 3.0, mode: same_sign,
      msg: "달러-금 동반 상승 — 실질금리 외 요인(중앙은행 매수·지정학) 우세"}
 
