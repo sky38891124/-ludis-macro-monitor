@@ -69,6 +69,24 @@ class Registry:
 
 
 # ── 수집 ────────────────────────────────────────────────────────────
+def _roll_to_bday(df: pd.DataFrame) -> pd.DataFrame:
+    """주말 날짜 관측을 다음 영업일로 이동.
+
+    실업수당 청구(ICSA/CCSA)는 토요일 날짜로 발표된다. 영업일 격자에 그냥
+    재색인하면 전 계열이 통째로 사라진다.
+    """
+    if df.empty:
+        return df
+    idx = pd.DatetimeIndex(df.index)
+    wk = idx.dayofweek >= 5
+    if not wk.any():
+        return df
+    new = idx.where(~wk, idx + pd.offsets.BDay(1))
+    out = df.copy()
+    out.index = pd.DatetimeIndex(new).normalize()
+    return out[~out.index.duplicated(keep="last")].sort_index()
+
+
 def collect(reg: Registry, offline: bool = False) -> pd.DataFrame:
     start = reg.meta.get("start", "2018-01-01")
     if offline:
@@ -82,7 +100,7 @@ def collect(reg: Registry, offline: bool = False) -> pd.DataFrame:
             sources.fetch_yahoo(reg.raw_specs("yahoo"), start),
             sources.fetch_ecos(reg.raw_specs("ecos"), start),
         ]
-        frames = [f for f in frames if not f.empty]
+        frames = [_roll_to_bday(f) for f in frames if not f.empty]
         if not frames:
             raise RuntimeError("모든 소스 수집 실패 — 네트워크/키 설정 확인")
         panel = pd.concat(frames, axis=1)
@@ -279,6 +297,10 @@ def find_divergences(reg: Registry, df: pd.DataFrame, stats: pd.DataFrame) -> li
     return hits
 
 
+# 발표 주기별 허용 지연(영업일). 이 안쪽이면 정상 게시 시차다.
+STALE_BUDGET = {"daily": 3, "weekly": 8, "monthly": 25}
+
+
 def diagnose(reg: Registry, stats: pd.DataFrame) -> dict[str, Any]:
     """수집 결손과 데이터 지연을 명시한다. 조용히 빠진 지표가 가장 위험하다."""
     expected = reg.all_ids
@@ -289,7 +311,16 @@ def diagnose(reg: Registry, stats: pd.DataFrame) -> dict[str, Any]:
          "group": reg.spec(i)["group_label"]}
         for i in expected if i not in got
     ]
-    stale = stats[stats["stale"] > 0][["label", "group_label", "stale", "asof"]]
+    # 구조적 시차(미국장 마감·주간 발표)와 진짜 이상 지연을 구분한다.
+    rows = []
+    for iid, r in stats[stats["stale"] > 0].iterrows():
+        freq = reg.spec(iid).get("freq", "daily")
+        budget = STALE_BUDGET.get(freq, 3)
+        rows.append({"id": iid, "label": r["label"], "group_label": r["group_label"],
+                     "stale": int(r["stale"]), "asof": r["asof"], "freq": freq,
+                     "over": int(r["stale"]) > budget})
+    stale = [x for x in rows if x["over"]]
+    stale.sort(key=lambda x: -x["stale"])
     by_source: dict[str, list[str]] = {}
     for m in missing:
         by_source.setdefault(m["source"], []).append(m["label"])
@@ -297,7 +328,7 @@ def diagnose(reg: Registry, stats: pd.DataFrame) -> dict[str, Any]:
         "expected": len(expected), "collected": len(got),
         "coverage": round(len(got) / len(expected), 2) if expected else 0.0,
         "missing": missing, "missing_by_source": by_source,
-        "stale": stale.reset_index().to_dict(orient="records"),
+        "stale": stale, "stale_normal": len(rows) - len(stale),
     }
 
 
