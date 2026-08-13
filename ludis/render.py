@@ -64,7 +64,10 @@ def to_markdown(res: dict[str, Any]) -> str:
         L.append("- 전 지표 정상 수집.")
     if d["stale"]:
         old = [f"{x['label']}({x['stale']}일)" for x in d["stale"][:8]]
-        L.append(f"- 지연 {len(d['stale'])}종: {', '.join(old)}")
+        L.append(f"- **비정상 지연 {len(d['stale'])}종**: {', '.join(old)}"
+                 + (" 외" if len(d["stale"]) > 8 else ""))
+    if d.get("stale_normal"):
+        L.append(f"- 정상 시차 {d['stale_normal']}종 (미국장 마감·주간 발표에 따른 구조적 지연)")
     L.append("")
 
     # 1) 오늘 실제로 움직인 것
@@ -350,6 +353,7 @@ def to_html(res: dict[str, Any]) -> str:
       <dt>정합성 위반</dt><dd>{len(res['divergences'])}건</dd>
       <dt>최대 기여</dt><dd>{top}</dd>
       <dt>수집 커버리지</dt><dd>{res['diag']['coverage']*100:.0f}%</dd>
+      <dt>비정상 지연</dt><dd>{len(res['diag']['stale'])}종</dd>
     </dl>
   </div>
   <div class="alerts">{''.join(cards)}</div>
