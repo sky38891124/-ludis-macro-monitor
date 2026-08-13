@@ -323,7 +323,8 @@ def diagnose(reg: Registry, stats: pd.DataFrame) -> dict[str, Any]:
         if budget is None:
             budget = STALE_BUDGET.get(sp.get("freq", "daily"), 3)
         rows.append({"id": iid, "label": r["label"], "group_label": r["group_label"],
-                     "stale": int(r["stale"]), "asof": r["asof"], "freq": freq,
+                     "stale": int(r["stale"]), "asof": r["asof"],
+                     "freq": sp.get("freq", "daily"), "budget": budget,
                      "over": int(r["stale"]) > budget})
     stale = [x for x in rows if x["over"]]
     stale.sort(key=lambda x: -x["stale"])
