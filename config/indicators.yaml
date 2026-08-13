@@ -115,10 +115,14 @@ groups:
     indicators:
       - {id: DXY, label: 달러인덱스(DXY), source: yahoo, code: "DX-Y.NYB|DX=F", unit: idx, risk_dir: up,
          note: "유로 비중 57.6%. 사실상 EUR 반대매매. 단독 해석 금지"}
-      - {id: BROAD_USD, label: 광의 무역가중 달러, source: fred, code: DTWEXBGS, unit: idx, risk_dir: up}
+      - {id: BROAD_USD, label: 광의 무역가중 달러, source: fred, code: DTWEXBGS, unit: idx,
+         risk_dir: up, stale_budget: 7, note: "FRED 게시가 상시 3~5일 지연된다"}
       - {id: USDKRW, label: USD/KRW, source: yahoo, code: "KRW=X", unit: krw, risk_dir: up,
          thresholds: {warn: 1400, alert: 1450}}
-      - {id: USDCNH, label: USD/CNH, source: yahoo, code: "CNH=X|USDCNH=X|CNY=X", unit: idx, risk_dir: up,
+      # Yahoo 의 CNH 티커가 상시 불안정해 FRED 역내 위안으로 교체.
+      # 역외(CNH)와 미세한 차이가 있으나 원화 앵커 용도로는 충분하다.
+      - {id: USDCNH, label: USD/CNY(역내), source: fred, code: DEXCHUS, unit: idx,
+         risk_dir: up, stale_budget: 7,
          note: "원화의 실질 1차 앵커. DXY보다 KRW 설명력 높음"}
       - {id: USDJPY, label: USD/JPY, source: yahoo, code: "JPY=X", unit: idx, risk_dir: none,
          note: "급락 시 엔캐리 청산 → 글로벌 디레버리징 경로"}
