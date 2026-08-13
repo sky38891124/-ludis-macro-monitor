@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import os
+import time
 import warnings
 from typing import Iterable
 
@@ -22,6 +23,23 @@ UA = {"User-Agent": "ludis-macro-monitor/1.0"}
 
 def _warn(msg: str) -> None:
     warnings.warn(msg, RuntimeWarning, stacklevel=2)
+
+
+def _get(url: str, *, params=None, timeout: int = 30, tries: int = 3):
+    """일시적 네트워크 오류를 재시도로 흡수한다.
+
+    ECOS 는 해외 러너에서 간헐적으로 연결이 지연된다. 한 번 실패했다고
+    지표를 통째로 버리면 리포트가 매일 달라진다.
+    """
+    last = None
+    for i in range(tries):
+        try:
+            return requests.get(url, params=params, headers=UA, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if i < tries - 1:
+                time.sleep(2 ** i)
+    raise last
 
 
 # ── FRED ────────────────────────────────────────────────────────────
@@ -141,7 +159,7 @@ def fetch_ecos(specs: dict[str, str], start: str, end: str | None = None) -> pd.
         try:
             stat, cycle, item = spec.split("/")
             url = f"{ECOS_API}/{key}/json/kr/1/100000/{stat}/{cycle}/{s0}/{end}/{item}"
-            r = requests.get(url, headers=UA, timeout=30)
+            r = _get(url, timeout=60)
             r.raise_for_status()
             js = r.json()
             if "StatisticSearch" not in js:
@@ -174,10 +192,19 @@ def fetch_synthetic(ids: Iterable[str], start: str, seed: int = 7) -> pd.DataFra
         "KTB3Y": 2.6, "KTB10Y": 3.0, "CORP3Y": 3.2, "CD91": 2.7, "BASERATE": 2.5,
         "CLAIMS": 225000, "CONT_CLAIMS": 1900000,
     }
+    # 주간 발표 계열과 게시 지연을 재현한다. 지연이 0인 완벽한 표본만 만들면
+    # diagnose() 의 지연 판정 경로가 테스트에서 한 번도 실행되지 않는다.
+    lag = {"WALCL": 6, "TGA": 6, "RESERVES": 6, "NFCI": 4, "BROAD_USD": 4,
+           "CLAIMS": 5, "CONT_CLAIMS": 5, "BASERATE": 3,
+           "UST2Y": 2, "UST10Y": 2, "HY_OAS": 2, "CCC_OAS": 2, "SPY": 1, "VIX": 1}
     out = {}
     for i, iid in enumerate(ids):
         base = anchors.get(iid, 100.0)
         vol = 0.008 if base > 10 else 0.02
         path = base * np.exp(np.cumsum(rng.normal(0, vol, len(idx))) - 0.0)
-        out[iid] = pd.Series(path, index=idx)
+        s = pd.Series(path, index=idx)
+        n = lag.get(iid, 0)
+        if n:
+            s.iloc[-n:] = np.nan
+        out[iid] = s
     return pd.DataFrame(out)
