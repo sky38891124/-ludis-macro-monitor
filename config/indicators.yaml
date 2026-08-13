@@ -49,17 +49,22 @@ groups:
   - id: liquidity
     label: 유동성·펀딩
     indicators:
-      - {id: WALCL, label: 연준 자산, source: fred, code: WALCL, unit: bn, risk_dir: down, freq: weekly}
-      - {id: TGA, label: 재무부 일반계정(TGA), source: fred, code: WTREGEN, unit: bn, risk_dir: up, freq: weekly}
-      - {id: RRP, label: 역레포 잔고, source: fred, code: RRPONTSYD, unit: bn, risk_dir: up}
-      - {id: RESERVES, label: 지급준비금, source: fred, code: WRESBAL, unit: bn, risk_dir: down, freq: weekly,
-         thresholds: {warn: 3000, alert: 2800}}
+      # FRED 원단위가 백만달러인 계열은 scale 로 십억달러에 맞춘다.
+      # 통일하지 않으면 순유동성이 음수가 되고 지급준비금 임계가 영원히 발동하지 않는다.
+      - {id: WALCL, label: 연준 자산, source: fred, code: WALCL, unit: bn, risk_dir: down,
+         freq: weekly, scale: 0.001}
+      - {id: TGA, label: 재무부 일반계정(TGA), source: fred, code: WTREGEN, unit: bn, risk_dir: up,
+         freq: weekly, scale: 0.001}
+      - {id: RRP, label: 역레포 잔고, source: fred, code: RRPONTSYD, unit: bn, risk_dir: up,
+         note: "원단위가 이미 십억달러라 scale 불필요"}
+      - {id: RESERVES, label: 지급준비금, source: fred, code: WRESBAL, unit: bn, risk_dir: down,
+         freq: weekly, scale: 0.001, thresholds: {warn: 3000, alert: 2800}}
       - {id: SOFR, label: SOFR, source: fred, code: SOFR, unit: pct, risk_dir: none}
       - {id: EFFR, label: EFFR, source: fred, code: EFFR, unit: pct, risk_dir: none}
       - {id: NFCI, label: 시카고연준 금융환경지수, source: fred, code: NFCI, unit: idx, risk_dir: up, freq: weekly,
          thresholds: {warn: 0.0, alert: 0.3}}
     derived:
-      - {id: NET_LIQ, label: 순유동성, expr: "WALCL / 1000 - TGA - RRP", unit: bn, risk_dir: down,
+      - {id: NET_LIQ, label: 순유동성, expr: "WALCL - TGA - RRP", unit: bn, risk_dir: down,
          note: "위험자산 유동성의 1차 근사. 주간 변화 방향이 레벨보다 중요"}
       - {id: SOFR_EFFR, label: SOFR-EFFR, expr: "(SOFR - EFFR) * 100", unit: bp, risk_dir: up,
          thresholds: {warn: 5, alert: 10},
@@ -140,7 +145,7 @@ groups:
     indicators:
       - {id: KOSPI, label: KOSPI, source: yahoo, code: "^KS11", unit: idx, risk_dir: down}
       - {id: KOSDAQ, label: KOSDAQ, source: yahoo, code: "^KQ11", unit: idx, risk_dir: down}
-      - {id: EWY, label: EWY(한국 ETF, 달러기준), source: yahoo, code: EWY, unit: usd, risk_dir: down,
+      - {id: EWY, label: "EWY(한국 ETF·달러기준)", source: yahoo, code: EWY, unit: usd, risk_dir: down,
          note: "EWY/KOSPI 괴리 = 순수 환율효과. 외국인 시각의 한국 수익률"}
       # ECOS 항목: 통계표/항목 코드는 ECOS 통계코드 검색에서 반드시 재확인할 것 (verify: true)
       - {id: KTB3Y, label: 국고채 3년, source: ecos, code: "817Y002/D/010200000", unit: pct, risk_dir: none, verify: true}
@@ -177,6 +182,12 @@ divergences:
   - {a: USDKRW, b: USDCNH, lookback: 5, min_gap: 1.0, mode: gap,
      msg: "원화가 위안화와 이탈 — 국내 고유 요인(수급/정책/신용) 개입"}
   # 실질금리 채널이 정상이면 달러와 금은 반대로 움직인다. 동반 상승은 채널 이탈 신호.
+  - {a: WTI, b: XLE, lookback: 5, min_gap: 5.0, mode: gap,
+     msg: "유가와 에너지주 상승폭 격차 — 시장이 유가 상승의 지속성을 할인 중"}
+  - {a: MOVE, b: VIX, lookback: 5, min_gap: 8.0, mode: sign,
+     msg: "채권 변동성과 주식 변동성 괴리 — 금리 불확실성이 주식에 아직 전이되지 않음"}
+  - {a: REAL10Y, b: BEI10, lookback: 20, min_gap: 8.0, mode: sign,
+     msg: "명목금리 상승의 실질/기대인플레 분해 — 실질 주도면 밸류에이션 압박"}
   - {a: DXY, b: GOLD, lookback: 20, min_gap: 3.0, mode: same_sign,
      msg: "달러-금 동반 상승 — 실질금리 외 요인(중앙은행 매수·지정학) 우세"}
 
