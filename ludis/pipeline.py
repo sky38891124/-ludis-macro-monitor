@@ -144,7 +144,10 @@ def add_derived(reg: Registry, panel: pd.DataFrame, ffill_limit: int = 10) -> pd
                 continue
             comps = [c for c in _ID_RE.findall(d["expr"]) if c in panel.columns]
             if comps:
-                native = panel[comps].notna().any(axis=1)
+                # 구성요소가 '모두' 실제 관측된 날에만 값을 남긴다.
+                # any 로 두면 순유동성처럼 주간 계열이 섞인 지표가 매일 갱신된 것처럼
+                # 보이면서, 실제로는 6일 묵은 값으로 1D 변동을 계산하게 된다.
+                native = panel[comps].notna().all(axis=1)
                 series = series.where(native)
             df[d["id"]] = series
     return df
@@ -155,6 +158,9 @@ def compute_stats(reg: Registry, df: pd.DataFrame) -> pd.DataFrame:
     zw = int(reg.meta.get("z_window", 252))
     pw = int(reg.meta.get("pct_window", 756))
     lbs = reg.meta.get("lookbacks", [1, 5, 20])
+    # 주간·월간 계열에 일간 기준 창(252영업일)을 그대로 쓰면 5년치를 보게 된다.
+    # 관측 빈도로 나눠 실제 기간을 맞춘다.
+    per_year = {"daily": 252, "weekly": 52, "monthly": 12}
 
     rows = []
     for iid in df.columns:
@@ -166,7 +172,13 @@ def compute_stats(reg: Registry, df: pd.DataFrame) -> pd.DataFrame:
         last, prev = s.iloc[-1], s.iloc[-2]
 
         # 금리·스프레드류는 bp 차분, 그 외는 % 변화율
-        diff_mode = unit in ("pct", "bp")
+        # chg_mode: diff 를 주면 % 대신 절대 차분으로 계산한다.
+        # 역레포 잔고처럼 0 근처를 오가는 계열은 % 변화가 노이즈가 된다.
+        diff_mode = spec.get("chg_mode") == "diff" or unit in ("pct", "bp")
+        if not diff_mode and float(s.tail(504).min()) <= 0:
+            # 음수를 오가는 계열(NFCI 등)에 퍼센트를 씌우면 부호가 뒤집힌다.
+            # -0.65 → -0.55 는 실제로 +0.10 인데 퍼센트로는 -15.4% 로 나온다.
+            diff_mode = True
         rec: dict[str, Any] = {
             "id": iid,
             "label": spec.get("label", iid),
@@ -178,26 +190,31 @@ def compute_stats(reg: Registry, df: pd.DataFrame) -> pd.DataFrame:
             "last": float(last),
             "asof": s.index[-1].date().isoformat(),
             "stale": int(len(pd.bdate_range(s.index[-1], df.index[-1])) - 1),
+            # 변화량이 % 인지 절대 차분인지. 렌더러가 접미사를 고를 때 쓴다.
+            "chg_unit": ("bp" if unit in ("pct", "bp") else unit) if diff_mode else "%",
         }
         for lb in lbs:
-            if len(s) > lb:
-                base = s.iloc[-1 - lb]
-                rec[f"chg_{lb}d"] = float(
-                    (last - base) * (100 if unit == "pct" else 1) if diff_mode
-                    else (last / base - 1) * 100
-                )
-            else:
+            base = _lookback(s, lb)
+            if base is None or (not diff_mode and base == 0):
                 rec[f"chg_{lb}d"] = np.nan
+                continue
+            rec[f"chg_{lb}d"] = float(
+                (last - base) * (100 if unit == "pct" else 1) if diff_mode
+                else (last / base - 1) * 100
+            )
 
         # 일간 변동의 표준화 (20일 변동성 대비 몇 σ인가)
         chg = s.diff() if diff_mode else s.pct_change()
         sd20 = chg.rolling(20).std().iloc[-1]
         rec["sigma"] = float(chg.iloc[-1] / sd20) if sd20 and not np.isnan(sd20) else np.nan
 
-        # 레벨 z-score / 백분위
-        mu, sd = s.rolling(zw).mean().iloc[-1], s.rolling(zw).std().iloc[-1]
+        # 레벨 z-score / 백분위 (발표 주기에 맞춘 창)
+        n = per_year.get(spec.get("freq", "daily"), 252)
+        zw_i = max(20, round(zw * n / 252))
+        pw_i = max(30, round(pw * n / 252))
+        mu, sd = s.rolling(zw_i).mean().iloc[-1], s.rolling(zw_i).std().iloc[-1]
         rec["z"] = float((last - mu) / sd) if sd and not np.isnan(sd) else np.nan
-        win = s.iloc[-pw:]
+        win = s.iloc[-pw_i:]
         rec["pctile"] = float((win < last).mean() * 100)
 
         # 임계 레벨 판정
@@ -209,6 +226,22 @@ def compute_stats(reg: Registry, df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(rows).set_index("id")
     out["abs_sigma"] = out["sigma"].abs()
     return out
+
+
+def _lookback(s: pd.Series, lb: int):
+    """lb 영업일 전 시점의 값. 없으면 그 이전 마지막 관측.
+
+    위치 기반(iloc[-1-lb])은 중간에 하루가 비면 기준점이 통째로 밀린다.
+    Yahoo 일괄 다운로드가 실행마다 특정 티커의 하루치를 빠뜨리는 일이 있어
+    같은 데이터로도 5D/20D 값이 달라졌다. 날짜를 기준으로 잡으면 안정된다.
+    """
+    if len(s) < 2:
+        return None
+    target = s.index[-1] - pd.offsets.BDay(lb)
+    prior = s.loc[:target]
+    if len(prior):
+        return float(prior.iloc[-1])
+    return None
 
 
 def _state(v: float, th: dict, risk_dir: str) -> str:
@@ -276,10 +309,14 @@ def find_divergences(reg: Registry, df: pd.DataFrame, stats: pd.DataFrame) -> li
         if a not in df.columns or b not in df.columns:
             continue
         sa, sb = df[a].dropna(), df[b].dropna()
-        if len(sa) <= lb or len(sb) <= lb:
+        base_a, base_b = _lookback(sa, lb), _lookback(sb, lb)
+        if not base_a or not base_b:
             continue
-        ra = (sa.iloc[-1] / sa.iloc[-1 - lb] - 1) * 100
-        rb = (sb.iloc[-1] / sb.iloc[-1 - lb] - 1) * 100
+        # 음수 구간을 오가는 계열은 비율 비교가 부호를 뒤집는다. 건너뛴다.
+        if base_a <= 0 or base_b <= 0 or sa.iloc[-1] <= 0 or sb.iloc[-1] <= 0:
+            continue
+        ra = (sa.iloc[-1] / base_a - 1) * 100
+        rb = (sb.iloc[-1] / base_b - 1) * 100
         gap = abs(ra - rb)
         same_sign = np.sign(ra) == np.sign(rb)
         mode = d.get("mode", "sign")
@@ -296,7 +333,10 @@ def find_divergences(reg: Registry, df: pd.DataFrame, stats: pd.DataFrame) -> li
                 "a": a, "b": b, "a_label": stats.at[a, "label"] if a in stats.index else a,
                 "b_label": stats.at[b, "label"] if b in stats.index else b,
                 "lookback": lb, "ra": round(float(ra), 2), "rb": round(float(rb), 2),
-                "gap": round(float(gap), 2), "msg": d["msg"],
+                "gap": round(float(gap), 2),
+                # 방향이 뒤집힌 경우 문구도 뒤집는다. 고정 문구만 쓰면
+                # 데이터와 반대로 말하는 설명이 나온다.
+                "msg": (d.get("msg_rev") or d["msg"]) if ra < rb else d["msg"],
             })
     return hits
 
@@ -331,7 +371,21 @@ def diagnose(reg: Registry, stats: pd.DataFrame) -> dict[str, Any]:
     by_source: dict[str, list[str]] = {}
     for m in missing:
         by_source.setdefault(m["source"], []).append(m["label"])
+
+    # 시점 혼재 탐지: 장중에 수동 실행하면 아시아 시장·FX 만 당일 값이 잡히고
+    # 미국 지표는 전일 종가라, 두 블록의 1D 를 나란히 비교하면 어긋난다.
+    daily = stats[stats.index.map(lambda i: reg.spec(i).get("freq", "daily") == "daily")]
+    intraday: list[dict[str, Any]] = []
+    if len(daily):
+        newest = daily["asof"].max()
+        at_newest = daily[daily["asof"] == newest]
+        # 최신 시점을 소수 지표만 갖고 있으면 그 시장은 아직 열려 있을 가능성이 크다.
+        # 절반 이상이 공유하는 시점이면 정상 마감이므로 경고하지 않는다.
+        if 0 < len(at_newest) < len(daily) * 0.5:
+            intraday = [{"id": i, "label": r["label"], "asof": r["asof"]}
+                        for i, r in at_newest.iterrows()]
     return {
+        "intraday": intraday,
         "expected": len(expected), "collected": len(got),
         "coverage": round(len(got) / len(expected), 2) if expected else 0.0,
         "missing": missing, "missing_by_source": by_source,
