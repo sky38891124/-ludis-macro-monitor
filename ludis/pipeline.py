@@ -84,7 +84,11 @@ def _roll_to_bday(df: pd.DataFrame) -> pd.DataFrame:
     new = idx.where(~wk, idx + pd.offsets.BDay(1))
     out = df.copy()
     out.index = pd.DatetimeIndex(new).normalize()
-    return out[~out.index.duplicated(keep="last")].sort_index()
+    # 굴러온 토요일 행은 기존 월요일 행과 인덱스가 겹친다.
+    # 행 단위로 버리면 한쪽 계열이 통째로 사라지므로, 열별로 병합한다.
+    if out.index.has_duplicates:
+        out = out.groupby(level=0).first()
+    return out.sort_index()
 
 
 def collect(reg: Registry, offline: bool = False) -> pd.DataFrame:
@@ -314,8 +318,10 @@ def diagnose(reg: Registry, stats: pd.DataFrame) -> dict[str, Any]:
     # 구조적 시차(미국장 마감·주간 발표)와 진짜 이상 지연을 구분한다.
     rows = []
     for iid, r in stats[stats["stale"] > 0].iterrows():
-        freq = reg.spec(iid).get("freq", "daily")
-        budget = STALE_BUDGET.get(freq, 3)
+        sp = reg.spec(iid)
+        budget = sp.get("stale_budget")
+        if budget is None:
+            budget = STALE_BUDGET.get(sp.get("freq", "daily"), 3)
         rows.append({"id": iid, "label": r["label"], "group_label": r["group_label"],
                      "stale": int(r["stale"]), "asof": r["asof"], "freq": freq,
                      "over": int(r["stale"]) > budget})
