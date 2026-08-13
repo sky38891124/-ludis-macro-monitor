@@ -82,11 +82,17 @@ def fetch_fred(specs: dict[str, str], start: str) -> pd.DataFrame:
 
 # ── Yahoo Finance ───────────────────────────────────────────────────
 def fetch_yahoo(specs: dict[str, str], start: str) -> pd.DataFrame:
+    """code 에 "A|B|C" 로 대체 티커를 나열하면 앞에서부터 순차 시도한다.
+
+    ^VIX3M, CNH=X 처럼 간헐적으로 응답이 끊기는 심볼 대비.
+    """
     if not specs:
         return pd.DataFrame()
     import yfinance as yf
 
-    tickers = list(dict.fromkeys(specs.values()))
+    alts = {iid: [x.strip() for x in code.split("|") if x.strip()]
+            for iid, code in specs.items()}
+    tickers = list(dict.fromkeys(t for v in alts.values() for t in v))
     try:
         raw = yf.download(
             tickers, start=start, auto_adjust=True, progress=False,
@@ -104,15 +110,18 @@ def fetch_yahoo(specs: dict[str, str], start: str) -> pd.DataFrame:
         close = raw[["Close"]].rename(columns={"Close": tickers[0]})
 
     out: dict[str, pd.Series] = {}
-    for iid, tk in specs.items():
-        if tk in close.columns:
+    for iid, cands in alts.items():
+        for i, tk in enumerate(cands):
+            if tk not in close.columns:
+                continue
             s = close[tk].dropna()
             if len(s):
                 out[iid] = s
-            else:
-                _warn(f"[yahoo] {iid}({tk}) 데이터 없음")
+                if i:
+                    _warn(f"[yahoo] {iid}: {cands[0]} 실패 → 대체 {tk} 사용")
+                break
         else:
-            _warn(f"[yahoo] {iid}({tk}) 티커 응답 없음")
+            _warn(f"[yahoo] {iid} 전 티커 실패: {'|'.join(cands)}")
     return pd.DataFrame(out).sort_index() if out else pd.DataFrame()
 
 
