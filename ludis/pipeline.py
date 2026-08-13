@@ -1,6 +1,7 @@
 """수집 → 파생 → 통계 파이프라인."""
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,15 @@ class Registry:
             composite=cfg.get("composite", {}),
             manual=cfg.get("manual", []),
         )
+
+    def scales(self) -> dict[str, float]:
+        """원단위 보정 계수. FRED 백만달러 계열을 십억달러로 맞추는 데 쓴다."""
+        return {
+            ind["id"]: float(ind["scale"])
+            for g in self.groups
+            for ind in g.get("indicators", [])
+            if ind.get("scale") is not None
+        }
 
     def raw_specs(self, source: str) -> dict[str, str]:
         return {
@@ -77,23 +87,44 @@ def collect(reg: Registry, offline: bool = False) -> pd.DataFrame:
             raise RuntimeError("모든 소스 수집 실패 — 네트워크/키 설정 확인")
         panel = pd.concat(frames, axis=1)
 
+    # 파생지표 계산 전에 원단위를 통일한다.
+    for iid, k in reg.scales().items():
+        if iid in panel.columns:
+            panel[iid] = panel[iid] * k
+
     panel = panel.sort_index()
     panel = panel[~panel.index.duplicated(keep="last")]
-    # 영업일 격자에 정렬 후 전진충전 (주간 지표: WALCL/NFCI 등)
+    # 영업일 격자에만 정렬한다. 전진충전은 하지 않는다.
+    # ffill 을 하면 미체결일이 직전 종가로 채워져 "1D +0.00%" 라는 허위 신호가 생긴다.
     grid = pd.bdate_range(panel.index.min(), panel.index.max())
-    return panel.reindex(grid).ffill(limit=10)
+    return panel.reindex(grid)
 
 
-def add_derived(reg: Registry, panel: pd.DataFrame) -> pd.DataFrame:
-    """expr 는 지표 id 와 산술연산만 허용하는 제한 네임스페이스에서 평가."""
+_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def add_derived(reg: Registry, panel: pd.DataFrame, ffill_limit: int = 10) -> pd.DataFrame:
+    """expr 는 지표 id 와 산술연산만 허용하는 제한 네임스페이스에서 평가.
+
+    계산에는 전진충전본을 쓰되(주간 지표와 일간 지표의 시점 정렬),
+    결과는 구성요소 중 하나라도 실제 관측이 있었던 날짜에만 남긴다.
+    그렇지 않으면 파생지표가 휴장일까지 값을 갖게 되어 변화율이 0으로 왜곡된다.
+    """
     df = panel.copy()
+    filled = panel.ffill(limit=ffill_limit)
     for g in reg.groups:
         for d in g.get("derived", []):
-            ns = {c: df[c] for c in df.columns}
+            ns = {c: filled[c] for c in filled.columns}
             try:
-                df[d["id"]] = eval(d["expr"], {"__builtins__": {}}, ns)  # noqa: S307
+                series = eval(d["expr"], {"__builtins__": {}}, ns)  # noqa: S307
             except Exception as exc:  # noqa: BLE001
                 warnings.warn(f"[derived] {d['id']} 계산 실패: {exc}", RuntimeWarning)
+                continue
+            comps = [c for c in _ID_RE.findall(d["expr"]) if c in panel.columns]
+            if comps:
+                native = panel[comps].notna().any(axis=1)
+                series = series.where(native)
+            df[d["id"]] = series
     return df
 
 
@@ -124,6 +155,7 @@ def compute_stats(reg: Registry, df: pd.DataFrame) -> pd.DataFrame:
             "note": spec.get("note"),
             "last": float(last),
             "asof": s.index[-1].date().isoformat(),
+            "stale": int(len(pd.bdate_range(s.index[-1], df.index[-1])) - 1),
         }
         for lb in lbs:
             if len(s) > lb:
@@ -195,6 +227,7 @@ def composite_score(reg: Registry, stats: pd.DataFrame) -> dict[str, Any]:
             parts.append({"id": iid, "label": stats.at[iid, "label"],
                           "z": round(z, 2), "weight": wt,
                           "contrib": round(wt * z, 3)})
+    coverage = wsum / sum(abs(v) for v in w.values()) if w else 0.0
     score = total / wsum if wsum else np.nan
     if score >= 1.0:
         regime = "리스크오프"
@@ -206,8 +239,12 @@ def composite_score(reg: Registry, stats: pd.DataFrame) -> dict[str, Any]:
         regime = "완화적"
     else:
         regime = "중립"
+    if coverage < 0.7:
+        regime += " (참고용·구성지표 결손)"
     parts.sort(key=lambda x: -abs(x["contrib"]))
-    return {"score": round(float(score), 2), "regime": regime, "parts": parts}
+    missing = [i for i in w if i not in stats.index or np.isnan(stats.at[i, "z"])]
+    return {"score": round(float(score), 2), "regime": regime, "parts": parts,
+            "coverage": round(coverage, 2), "missing": missing}
 
 
 def find_divergences(reg: Registry, df: pd.DataFrame, stats: pd.DataFrame) -> list[dict]:
@@ -242,11 +279,34 @@ def find_divergences(reg: Registry, df: pd.DataFrame, stats: pd.DataFrame) -> li
     return hits
 
 
+def diagnose(reg: Registry, stats: pd.DataFrame) -> dict[str, Any]:
+    """수집 결손과 데이터 지연을 명시한다. 조용히 빠진 지표가 가장 위험하다."""
+    expected = reg.all_ids
+    got = set(stats.index)
+    missing = [
+        {"id": i, "label": reg.spec(i).get("label", i),
+         "source": reg.spec(i).get("source", "derived"),
+         "group": reg.spec(i)["group_label"]}
+        for i in expected if i not in got
+    ]
+    stale = stats[stats["stale"] > 0][["label", "group_label", "stale", "asof"]]
+    by_source: dict[str, list[str]] = {}
+    for m in missing:
+        by_source.setdefault(m["source"], []).append(m["label"])
+    return {
+        "expected": len(expected), "collected": len(got),
+        "coverage": round(len(got) / len(expected), 2) if expected else 0.0,
+        "missing": missing, "missing_by_source": by_source,
+        "stale": stale.reset_index().to_dict(orient="records"),
+    }
+
+
 def build(reg: Registry, offline: bool = False) -> dict[str, Any]:
     panel = collect(reg, offline=offline)
     df = add_derived(reg, panel)
     stats = compute_stats(reg, df)
     return {
+        "diag": diagnose(reg, stats),
         "asof": df.index[-1].date().isoformat(),
         "panel": df,
         "stats": stats,
