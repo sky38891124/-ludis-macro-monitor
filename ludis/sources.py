@@ -139,7 +139,19 @@ def fetch_yahoo(specs: dict[str, str], start: str) -> pd.DataFrame:
                     _warn(f"[yahoo] {iid}: {cands[0]} 실패 → 대체 {tk} 사용")
                 break
         else:
-            _warn(f"[yahoo] {iid} 전 티커 실패: {'|'.join(cands)}")
+            # 일괄 다운로드는 간헐적으로 특정 티커를 누락한다. 개별로 한 번 더.
+            for tk in cands:
+                try:
+                    s = yf.Ticker(tk).history(start=start, auto_adjust=True)["Close"].dropna()
+                    if len(s):
+                        s.index = pd.DatetimeIndex(s.index).tz_localize(None).normalize()
+                        out[iid] = s
+                        _warn(f"[yahoo] {iid}: 일괄 실패 → 개별 재조회 성공({tk})")
+                        break
+                except Exception:  # noqa: BLE001, S110
+                    pass
+            else:
+                _warn(f"[yahoo] {iid} 전 티커 실패: {'|'.join(cands)}")
     return pd.DataFrame(out).sort_index() if out else pd.DataFrame()
 
 
@@ -182,8 +194,9 @@ def fetch_synthetic(ids: Iterable[str], start: str, seed: int = 7) -> pd.DataFra
         "UST3M": 3.9, "UST2Y": 3.87, "UST5Y": 4.0, "UST10Y": 4.35, "UST30Y": 4.9,
         "REAL10Y": 1.95, "BEI10": 2.4, "FWD5Y5Y": 2.4,
         "HY_OAS": 2.77, "IG_OAS": 0.85, "CCC_OAS": 7.2,
-        "WALCL": 6_400_000, "TGA": 720, "RRP": 15, "RESERVES": 3100,
-        "SOFR": 3.9, "EFFR": 3.88, "NFCI": -0.55,
+        # FRED 원단위 그대로 둔다(백만달러). scale 보정 경로까지 테스트하기 위함.
+        "WALCL": 6_748_567, "TGA": 907_324, "RRP": 15, "RESERVES": 2_993_349,
+        "SOFR": 3.9, "EFFR": 3.88, "NFCI": -0.55, "BROAD_USD": 119.06, "USDCNH": 6.75,
         "VIX": 17.83, "VIX3M": 19.15, "MOVE": 70.63, "SKEW": 141,
         "USDKRW": 1450, "USDCNH": 7.05, "USDJPY": 152, "EURUSD": 1.09,
         "DXY": 97.845, "BROAD_USD": 121,
