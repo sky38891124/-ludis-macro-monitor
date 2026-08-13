@@ -29,9 +29,10 @@ def _fmt(v: float, unit: str) -> str:
 
 
 def _chg(v: float, unit: str) -> str:
+    """unit 은 변화량의 단위(stats 의 chg_unit). 종가 단위와 다를 수 있다."""
     if v is None or (isinstance(v, float) and math.isnan(v)):
         return "—"
-    suffix = "bp" if unit in ("pct", "bp") else "%"
+    suffix = {"pct": "bp", "idx": "", "usd": "", "krw": "", "ratio": "", "bn": ""}.get(unit, unit)
     return f"{v:+,.1f}{suffix}" if abs(v) >= 10 else f"{v:+,.2f}{suffix}"
 
 
@@ -66,6 +67,10 @@ def to_markdown(res: dict[str, Any]) -> str:
         old = [f"{x['label']}({x['stale']}일)" for x in d["stale"][:8]]
         L.append(f"- **비정상 지연 {len(d['stale'])}종**: {', '.join(old)}"
                  + (" 외" if len(d["stale"]) > 8 else ""))
+    if d.get("intraday"):
+        names = ", ".join(x["label"] for x in d["intraday"][:6])
+        L.append(f"- **시점 혼재 {len(d['intraday'])}종**: {names} — 다수 지표보다 최신 시점이다. "
+                 f"장중 수동 실행이면 미체결 값일 수 있으니 이 지표들의 1D 는 그대로 믿지 말 것")
     if d.get("stale_normal"):
         L.append(f"- 정상 시차 {d['stale_normal']}종 (미국장 마감·주간 발표에 따른 구조적 지연)")
     L.append("")
@@ -78,7 +83,7 @@ def to_markdown(res: dict[str, Any]) -> str:
     else:
         for iid, r in flags.head(12).iterrows():
             L.append(f"- **{r['label']}** {_fmt(r['last'], r['unit'])} "
-                     f"({_chg(r['chg_1d'], r['unit'])}, {_sig(r['sigma'])}, "
+                     f"({_chg(r['chg_1d'], r['chg_unit'])}, {_sig(r['sigma'])}, "
                      f"{r['pctile']:.0f}분위)")
     L.append("")
 
@@ -114,8 +119,8 @@ def to_markdown(res: dict[str, Any]) -> str:
         for iid, r in sub.iterrows():
             mark = f"{r['asof']}" + (f" ({r['stale']}일 지연)" if r["stale"] else "")
             L.append(
-                f"| {r['label']} | {_fmt(r['last'], r['unit'])} | {_chg(r['chg_1d'], r['unit'])} "
-                f"| {_chg(r['chg_5d'], r['unit'])} | {_chg(r['chg_20d'], r['unit'])} "
+                f"| {r['label']} | {_fmt(r['last'], r['unit'])} | {_chg(r['chg_1d'], r['chg_unit'])} "
+                f"| {_chg(r['chg_5d'], r['chg_unit'])} | {_chg(r['chg_20d'], r['chg_unit'])} "
                 f"| {_sig(r['sigma'])} | {'—' if math.isnan(r['z']) else format(r['z'], '+.1f')} "
                 f"| {r['pctile']:.0f} | {mark} |"
             )
@@ -274,7 +279,7 @@ def to_html(res: dict[str, Any]) -> str:
         cards.append(
             f'<div class="card div"><span class="k">이례적 변동 {_sig(r["sigma"])}</span>'
             f'<b>{r["label"]}</b> {_fmt(r["last"], r["unit"])} '
-            f'({_chg(r["chg_1d"], r["unit"])})<p>{r["pctile"]:.0f}분위 · 20일 변동성 대비 '
+            f'({_chg(r["chg_1d"], r["chg_unit"])})<p>{r["pctile"]:.0f}분위 · 20일 변동성 대비 '
             f'{abs(r["sigma"]):.1f}배</p></div>')
     lv = st[st["state"].isin(["alert", "warn"])].sort_values("state")
     for iid, r in lv.head(3).iterrows():
@@ -313,8 +318,8 @@ def to_html(res: dict[str, Any]) -> str:
             rows.append(
                 f'<tr><td>{dot}{r["label"]}{stale}</td>'
                 f'<td>{_fmt(r["last"], r["unit"])}</td>'
-                f'{c(r["chg_1d"], r["unit"])}{c(r["chg_5d"], r["unit"])}'
-                f'{c(r["chg_20d"], r["unit"], "hide-sm")}'
+                f'{c(r["chg_1d"], r["chg_unit"])}{c(r["chg_5d"], r["chg_unit"])}'
+                f'{c(r["chg_20d"], r["chg_unit"], "hide-sm")}'
                 f'<td class="sig">{_bar(r["sigma"])}</td>'
                 f'<td class="hide-sm">{z}</td>'
                 f'<td class="hide-sm mut">{r["pctile"]:.0f}</td></tr>')
@@ -355,6 +360,7 @@ def to_html(res: dict[str, Any]) -> str:
       <dt>최대 기여</dt><dd>{top}</dd>
       <dt>수집 커버리지</dt><dd>{res['diag']['coverage']*100:.0f}%</dd>
       <dt>비정상 지연</dt><dd>{len(res['diag']['stale'])}종</dd>
+      <dt>시점 혼재</dt><dd>{len(res['diag'].get('intraday', []))}종</dd>
     </dl>
   </div>
   <div class="alerts">{''.join(cards)}</div>
