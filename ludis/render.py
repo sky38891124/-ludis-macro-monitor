@@ -51,6 +51,22 @@ def to_markdown(res: dict[str, Any]) -> str:
              else f"**리스크 스코어 {comp['score']:+.2f} ({comp['regime']})**")
     L.append("")
 
+    # 0) 수집 상태 — 결손을 먼저 밝힌다
+    d = res["diag"]
+    L.append(f"## 0. 수집 상태 — {d['collected']}/{d['expected']}종 "
+             f"(커버리지 {d['coverage']*100:.0f}%)")
+    if d["missing"]:
+        for src, labels in d["missing_by_source"].items():
+            L.append(f"- **{src} 결손 {len(labels)}종**: {', '.join(labels[:8])}"
+                     + (" 외" if len(labels) > 8 else ""))
+        L.append("- 결손 지표가 있으면 아래 리스크 스코어는 부분 표본 기준이다.")
+    else:
+        L.append("- 전 지표 정상 수집.")
+    if d["stale"]:
+        old = [f"{x['label']}({x['stale']}일)" for x in d["stale"][:8]]
+        L.append(f"- 지연 {len(d['stale'])}종: {', '.join(old)}")
+    L.append("")
+
     # 1) 오늘 실제로 움직인 것
     L.append("## 1. 오늘 유의미하게 움직인 지표 (|일간변동| ≥ 2σ)")
     flags: pd.DataFrame = res["sigma_flags"]
@@ -90,18 +106,21 @@ def to_markdown(res: dict[str, Any]) -> str:
         sub = st[st["group"] == gid]
         L.append("")
         L.append(f"### {sub.iloc[0]['group_label']}")
-        L.append("| 지표 | 종가 | 1D | 5D | 20D | σ | z | 분위 |")
-        L.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+        L.append("| 지표 | 종가 | 1D | 5D | 20D | σ | z | 분위 | 기준일 |")
+        L.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
         for iid, r in sub.iterrows():
+            mark = f"{r['asof']}" + (f" ({r['stale']}일 지연)" if r["stale"] else "")
             L.append(
                 f"| {r['label']} | {_fmt(r['last'], r['unit'])} | {_chg(r['chg_1d'], r['unit'])} "
                 f"| {_chg(r['chg_5d'], r['unit'])} | {_chg(r['chg_20d'], r['unit'])} "
-                f"| {_sig(r['sigma'])} | {r['z']:+.1f} | {r['pctile']:.0f} |"
+                f"| {_sig(r['sigma'])} | {r['z']:+.1f} | {r['pctile']:.0f} | {mark} |"
             )
     L.append("")
 
     # 5) 컴포짓 기여도
-    L.append("## 5. 리스크 스코어 기여도")
+    L.append(f"## 5. 리스크 스코어 기여도 (구성지표 커버리지 {comp.get('coverage', 0)*100:.0f}%)")
+    if comp.get("missing"):
+        L.append(f"- 결손: {', '.join(comp['missing'])} — 스코어 해석 시 감안할 것")
     for p in comp["parts"][:6]:
         L.append(f"- {p['label']}: z {p['z']:+.2f} × w {p['weight']:+.2f} = {p['contrib']:+.3f}")
     L.append("")
@@ -124,6 +143,7 @@ def to_json(res: dict[str, Any]) -> str:
     st = res["stats"].replace({np.nan: None})
     payload = {
         "asof": res["asof"],
+        "diagnostics": res["diag"],
         "composite": res["composite"],
         "stock_bond_corr": res["sb_corr"],
         "divergences": res["divergences"],
@@ -186,6 +206,8 @@ tbody td{padding:5px 8px;text-align:right;font-family:var(--mono);font-size:13px
 tbody td:first-child{text-align:left;font-family:var(--sans);color:var(--ink)}
 tbody tr:hover{background:var(--panel)}
 .pos{color:var(--up)} .neg{color:var(--down)} .mut{color:var(--ink-3)}
+.stale{font-family:var(--mono);font-size:10px;color:var(--amber);
+  border:1px solid var(--amber);border-radius:2px;padding:0 3px;margin-left:5px}
 .dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:6px;
   vertical-align:middle;background:transparent}
 .dot.warn{background:var(--amber)} .dot.alert{background:var(--down)}
@@ -237,6 +259,13 @@ def to_html(res: dict[str, Any]) -> str:
     sb = res["sb_corr"]
 
     cards = []
+    d = res["diag"]
+    if d["missing"]:
+        srcs = " · ".join(f"{k} {len(v)}종" for k, v in d["missing_by_source"].items())
+        cards.append(f'<div class="card alert"><span class="k">수집 결손</span>'
+                     f'<b>{d["expected"] - d["collected"]}종 누락</b>'
+                     f'<p>{srcs} · 커버리지 {d["coverage"]*100:.0f}% — '
+                     f'스코어는 부분 표본 기준</p></div>')
     for iid, r in res["sigma_flags"].head(3).iterrows():
         cards.append(
             f'<div class="card div"><span class="k">이례적 변동 {_sig(r["sigma"])}</span>'
@@ -270,6 +299,7 @@ def to_html(res: dict[str, Any]) -> str:
         rows = []
         for iid, r in sub.iterrows():
             dot = f'<span class="dot {r["state"]}"></span>' if r["state"] in ("warn", "alert") else '<span class="dot"></span>'
+            stale = f' <span class="stale">{r["stale"]}d</span>' if r["stale"] else ""
             def c(v, unit, extra=""):
                 if v is None or (isinstance(v, float) and math.isnan(v)):
                     return f'<td class="mut {extra}">—</td>'
@@ -277,7 +307,7 @@ def to_html(res: dict[str, Any]) -> str:
                 return f'<td class="{k} {extra}">{_chg(v, unit)}</td>'
             z = "—" if math.isnan(r["z"]) else f'{r["z"]:+.1f}'
             rows.append(
-                f'<tr><td>{dot}{r["label"]}</td>'
+                f'<tr><td>{dot}{r["label"]}{stale}</td>'
                 f'<td>{_fmt(r["last"], r["unit"])}</td>'
                 f'{c(r["chg_1d"], r["unit"])}{c(r["chg_5d"], r["unit"])}'
                 f'{c(r["chg_20d"], r["unit"], "hide-sm")}'
@@ -319,6 +349,7 @@ def to_html(res: dict[str, Any]) -> str:
       <dt>2σ 초과 변동</dt><dd>{len(res['sigma_flags'])}종</dd>
       <dt>정합성 위반</dt><dd>{len(res['divergences'])}건</dd>
       <dt>최대 기여</dt><dd>{top}</dd>
+      <dt>수집 커버리지</dt><dd>{res['diag']['coverage']*100:.0f}%</dd>
     </dl>
   </div>
   <div class="alerts">{''.join(cards)}</div>
