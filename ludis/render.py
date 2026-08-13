@@ -116,7 +116,8 @@ def to_markdown(res: dict[str, Any]) -> str:
             L.append(
                 f"| {r['label']} | {_fmt(r['last'], r['unit'])} | {_chg(r['chg_1d'], r['unit'])} "
                 f"| {_chg(r['chg_5d'], r['unit'])} | {_chg(r['chg_20d'], r['unit'])} "
-                f"| {_sig(r['sigma'])} | {r['z']:+.1f} | {r['pctile']:.0f} | {mark} |"
+                f"| {_sig(r['sigma'])} | {'—' if math.isnan(r['z']) else format(r['z'], '+.1f')} "
+                f"| {r['pctile']:.0f} | {mark} |"
             )
     L.append("")
 
